@@ -1,77 +1,96 @@
-import { assistantId } from "@/app/assistant-config";
 import { openai } from "@/app/openai";
 
-// upload file to assistant's vector store
+const FIXED_VECTOR_STORE_ID = "vs_69050fe6e43c8191be28bac47c3f565f";
+
+/* === UPLOAD FILE === */
 export async function POST(request) {
-  const formData = await request.formData(); // process file as FormData
-  const file = formData.get("file"); // retrieve the single file from FormData
-  const vectorStoreId = await getOrCreateVectorStore(); // get or create vector store
+  const formData = await request.formData();
+  const file = formData.get("file");
 
-  // upload using the file stream
-  const openaiFile = await openai.files.create({
-    file: file,
-    purpose: "assistants",
-  });
+  try {
+    // Subir el archivo al storage general de OpenAI
+    const openaiFile = await openai.files.create({
+      file: file,
+      purpose: "assistants",
+    });
 
-  // add file to vector store
-  await openai.beta.vectorStores.files.create(vectorStoreId, {
-    file_id: openaiFile.id,
-  });
-  return new Response();
+    // Asociarlo al vector store fijo
+    await openai.beta.vectorStores.files.create(FIXED_VECTOR_STORE_ID, {
+      file_id: openaiFile.id,
+    });
+
+    console.log(`✅ Archivo ${openaiFile.filename} agregado al storage ${FIXED_VECTOR_STORE_ID}`);
+    return new Response("Archivo cargado correctamente");
+  } catch (error) {
+    console.error("❌ Error subiendo archivo:", error);
+    return new Response("Error al subir archivo", { status: 500 });
+  }
 }
 
-// list files in assistant's vector store
+/* === LIST FILES (usa el storage fijo) === */
 export async function GET() {
-  const vectorStoreId = await getOrCreateVectorStore(); // get or create vector store
-  const fileList = await openai.beta.vectorStores.files.list(vectorStoreId);
+  try {
+    // Intentar listar los archivos del vector store
+    const fileList = await openai.beta.vectorStores.files.list(FIXED_VECTOR_STORE_ID);
 
-  const filesArray = await Promise.all(
-    fileList.data.map(async (file) => {
-      const fileDetails = await openai.files.retrieve(file.id);
-      const vectorFileDetails = await openai.beta.vectorStores.files.retrieve(
-        vectorStoreId,
-        file.id
-      );
-      return {
-        file_id: file.id,
-        filename: fileDetails.filename,
-        status: vectorFileDetails.status,
-      };
-    })
-  );
-  return Response.json(filesArray);
+    if (!fileList.data || fileList.data.length === 0) {
+      console.log(`⚠️ No hay archivos dentro del storage ${FIXED_VECTOR_STORE_ID}`);
+      return Response.json([]);
+    }
+
+    const filesArray = [];
+
+    for (const file of fileList.data) {
+      try {
+        const fileDetails = await openai.files.retrieve(file.id);
+        const vectorFileDetails = await openai.beta.vectorStores.files.retrieve(
+          FIXED_VECTOR_STORE_ID,
+          file.id
+        );
+
+        filesArray.push({
+          file_id: file.id,
+          filename: fileDetails.filename,
+          status: vectorFileDetails.status,
+        });
+      } catch (error) {
+        if (error.status === 404) {
+          //console.log(`🧹 Limpiando archivo inexistente: ${file.id}`);
+          await openai.beta.vectorStores.files.del(FIXED_VECTOR_STORE_ID, file.id);
+        } else {
+          console.warn(`⚠️ Error obteniendo detalles de archivo ${file.id}:`, error.message);
+        }
+      }
+    }
+
+    return Response.json(filesArray);
+  } catch (error) {
+    if (error.status === 404) {
+      console.warn(`⚠️ El storage ${FIXED_VECTOR_STORE_ID} no existe o no es accesible`);
+      return Response.json([]);
+    }
+
+    console.error("❌ Error listando archivos:", error);
+    return new Response("Error al listar archivos", { status: 500 });
+  }
 }
 
-// delete file from assistant's vector store
+/* === DELETE FILE === */
 export async function DELETE(request) {
   const body = await request.json();
   const fileId = body.fileId;
 
-  const vectorStoreId = await getOrCreateVectorStore(); // get or create vector store
-  await openai.beta.vectorStores.files.del(vectorStoreId, fileId); // delete file from vector store
+  try {
+    await openai.beta.vectorStores.files.del(FIXED_VECTOR_STORE_ID, fileId);
+    console.log(`🗑️ Archivo ${fileId} eliminado del storage ${FIXED_VECTOR_STORE_ID}`);
+    return new Response("Archivo eliminado correctamente");
+  } catch (error) {
+    if (error.status === 404) {
+      console.warn(`⚠️ El archivo ${fileId} no existe, nada que eliminar`);
+      return new Response("Archivo ya inexistente", { status: 200 });
+    }
 
-  return new Response();
-}
-
-/* Helper functions */
-
-const getOrCreateVectorStore = async () => {
-  const assistant = await openai.beta.assistants.retrieve(assistantId);
-
-  // if the assistant already has a vector store, return it
-  if (assistant.tool_resources?.file_search?.vector_store_ids?.length > 0) {
-    return assistant.tool_resources.file_search.vector_store_ids[0];
+    console.error("❌ Error eliminando archivo:", error);
+    return new Response("Error al eliminar archivo", { status: 500 });
   }
-  // otherwise, create a new vector store and attatch it to the assistant
-  const vectorStore = await openai.beta.vectorStores.create({
-    name: "sample-assistant-vector-store",
-  });
-  await openai.beta.assistants.update(assistantId, {
-    tool_resources: {
-      file_search: {
-        vector_store_ids: [vectorStore.id],
-      },
-    },
-  });
-  return vectorStore.id;
-};
+}
