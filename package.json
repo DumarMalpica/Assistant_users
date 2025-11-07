@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p ${PORT:-8080}",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${PORT:-8080}",
     "lint": "next lint"
   },
   "dependencies": {
@@ -22,5 +22,8 @@
   },
   "prettier": {
     "singleQuote": false
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
