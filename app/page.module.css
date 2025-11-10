@@ -35,12 +35,13 @@
   background-color: #efefef;
   cursor: pointer;
   max-width: 600px;
-  width: 120px;
+  min-width: 160px;
   height: 120px;
-  padding: 20px;
+  padding: 20px 30px; 
   transition: background-color 0.3s ease;
   font-weight: 500;
 }
+
 
 .category:hover {
   background-color: #e3e3eb;
