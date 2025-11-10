@@ -12,7 +12,7 @@ const Home = () => {
   return (
     <main className={styles.main}>
       <div className={styles.title}>
-        Explora aplicaciones de ejemplo creadas con la API de Assistants
+        Agente de Soporte Documental y Refinamiento de Respuestas RETIE
       </div>
       <div className={styles.container}>
         {Object.entries(categories).map(([name, url]) => (
