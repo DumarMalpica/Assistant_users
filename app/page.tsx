@@ -5,14 +5,14 @@ import styles from "./page.module.css";
 
 const Home = () => {
   const categories = {
-    "Chat Basico": "basic-chat",
-    "Agregar docuemntos": "file-search",
+    "Chat básico": "basic-chat",
+    "Búsqueda e ingesta de archivos": "file-search",
   };
 
   return (
     <main className={styles.main}>
       <div className={styles.title}>
-        Agente Secundario de Integración Documental y Mejora de Respuestas en Telegram
+        Explora aplicaciones de ejemplo creadas con la API de Assistants
       </div>
       <div className={styles.container}>
         {Object.entries(categories).map(([name, url]) => (
