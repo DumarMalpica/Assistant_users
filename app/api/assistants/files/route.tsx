@@ -1,6 +1,8 @@
 import { openai } from "@/app/openai";
 import { toFile } from "openai/uploads";
 
+export const runtime = "nodejs";
+
 const FIXED_VECTOR_STORE_ID = "vs_69050fe6e43c8191be28bac47c3f565f";
 
 // Helper: convertir Web ReadableStream en AsyncIterable<Uint8Array>
@@ -21,27 +23,28 @@ async function* toAsyncIterable(
   }
 }
 
-// Helper: ArrayBuffer -> base64 (funciona en Node y Edge)
+// Helper: ArrayBuffer -> base64
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  // Node.js / Next.js Node runtime
+  // Node.js / Next.js runtime
   // eslint-disable-next-line no-undef
   if (typeof Buffer !== "undefined") {
     // @ts-ignore Buffer global in Node
     return Buffer.from(buffer).toString("base64");
   }
 
-  // Fallback para runtimes tipo browser/edge
+  // Fallback para otros runtimes
   let binary = "";
   const bytes = new Uint8Array(buffer);
   const len = bytes.byteLength;
   for (let i = 0; i < len; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
+  // @ts-ignore btoa puede existir en entornos tipo browser
   return btoa(binary);
 }
 
 // EXTRA NODE: extraer texto de una IMAGEN usando GPT-4o-mini (visión)
-async function extractTextFromImage(file: File): Promise<string> {
+async function extractTextFromImage(file: any): Promise<string> {
   const arrayBuffer = await file.arrayBuffer();
   const base64 = arrayBufferToBase64(arrayBuffer);
   const mimeType = file.type || "image/png";
@@ -75,7 +78,6 @@ async function extractTextFromImage(file: File): Promise<string> {
     return content;
   }
 
-  // Si por alguna razón no viene como string, fallback vacío
   return "";
 }
 
@@ -83,16 +85,15 @@ async function extractTextFromImage(file: File): Promise<string> {
 // - Si es imagen -> la convertimos a TXT usando GPT-4o-mini y subimos ese texto.
 // - Si no es imagen -> se sube tal cual (con opción de streaming para archivos grandes).
 async function prepareUploadForVectorStore(
-  file: File,
+  file: any,
   url: URL
 ): Promise<{
-  uploadable: File | Blob | AsyncIterable<Uint8Array>;
+  uploadable: any;
   filename: string;
 }> {
   const mimeType = file.type || "";
   const isImage = mimeType.startsWith("image/");
 
-  // Si es imagen, la convertimos a texto ANTES de subirla
   if (isImage) {
     const extractedText = await extractTextFromImage(file);
 
@@ -100,7 +101,7 @@ async function prepareUploadForVectorStore(
       type: "text/plain",
     });
 
-    const baseName = file.name.replace(/\.[^/.]+$/, "");
+    const baseName = (file.name || "image").replace(/\.[^/.]+$/, "");
     const txtName = `${baseName}.txt`;
 
     return {
@@ -109,25 +110,24 @@ async function prepareUploadForVectorStore(
     };
   }
 
-  // Para otros tipos (PDF, doc, etc.) mantenemos la lógica de streaming opcional
   const useStreamParam = url.searchParams.get("stream");
   const useStream =
-    useStreamParam === "true" || file.size > 5 * 1024 * 1024; // ~5MB
+    useStreamParam === "true" || (file.size ?? 0) > 5 * 1024 * 1024; // ~5MB
 
-  if (useStream) {
+  if (useStream && typeof file.stream === "function") {
     const webStream = file.stream() as ReadableStream<Uint8Array>;
     const iterable = toAsyncIterable(webStream);
 
     return {
       uploadable: iterable,
-      filename: file.name,
+      filename: file.name || "upload.bin",
     };
   }
 
-  // Upload normal
+  // Upload normal (Blob-like)
   return {
     uploadable: file,
-    filename: file.name,
+    filename: file.name || "upload.bin",
   };
 }
 
@@ -143,10 +143,10 @@ async function prepareUploadForVectorStore(
  */
 export async function POST(request: Request) {
   const formData = await request.formData();
-  const file = formData.get("file") as File | null;
+  const file = formData.get("file") as any;
 
-  if (!file) {
-    return new Response("No file provided", { status: 400 });
+  if (!file || typeof file.arrayBuffer !== "function") {
+    return new Response("No file provided or invalid file", { status: 400 });
   }
 
   try {
@@ -157,16 +157,12 @@ export async function POST(request: Request) {
       url
     );
 
-    // Convertimos uploadable a un tipo aceptado por el SDK usando toFile
-    // (para AsyncIterable, Blob, etc.)
-    const fileForUpload =
-      uploadable instanceof File || uploadable instanceof Blob
-        ? uploadable
-        : await toFile(uploadable as any, filename);
+    // Siempre usamos toFile para convertir lo que tengamos (Blob, AsyncIterable, etc.)
+    const fileForUpload = await toFile(uploadable, filename);
 
     // Subimos el archivo ya “preprocesado” (imagen -> texto, o file original)
     const openaiFile = await openai.files.create({
-      file: fileForUpload as any,
+      file: fileForUpload,
       purpose: "assistants",
     });
 
