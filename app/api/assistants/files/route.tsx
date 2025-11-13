@@ -196,6 +196,11 @@ export async function POST(request: Request) {
  *
  * - Si NO recibe query param -> lista todos los archivos del vector store.
  * - Si recibe ?fileId=XXX     -> devuelve solo el estado de ese archivo (para polling).
+ *
+ * IMPORTANTE:
+ * - NUNCA borramos archivos aquí.
+ * - Aunque falle `files.retrieve`, seguimos mostrando el archivo
+ *   usando el `file_id` como nombre por defecto.
  */
 export async function GET(request: Request) {
   try {
@@ -218,17 +223,17 @@ export async function GET(request: Request) {
           last_error: vectorFileDetails.last_error,
         });
       } catch (error: any) {
-        if (error.status === 404) {
-          console.warn(
-            `⚠️ El archivo ${fileId} no existe en el vector store ${FIXED_VECTOR_STORE_ID}`
-          );
-          return new Response("File not found", { status: 404 });
-        }
-        console.error(
-          `❌ Error obteniendo estado del archivo ${fileId}:`,
-          error
+        console.warn(
+          `⚠️ No se pudieron obtener detalles para el archivo ${fileId}:`,
+          error?.message || error
         );
-        return new Response("Error retrieving file status", { status: 500 });
+        // Aún así devolvemos el ID para que el front sepa que existe
+        return Response.json({
+          file_id: fileId,
+          filename: fileId,
+          status: "unknown",
+          last_error: "Could not retrieve file details",
+        });
       }
     }
 
@@ -250,33 +255,25 @@ export async function GET(request: Request) {
       status: string;
     }> = [];
 
-    for (const file of fileList.data) {
-      try {
-        const fileDetails = await openai.files.retrieve(file.id);
-        const vectorFileDetails = await openai.beta.vectorStores.files.retrieve(
-          FIXED_VECTOR_STORE_ID,
-          file.id
-        );
+    for (const vf of fileList.data) {
+      let filename = vf.id;
+      let status = vf.status as string;
 
-        filesArray.push({
-          file_id: file.id,
-          filename: fileDetails.filename,
-          status: vectorFileDetails.status,
-        });
+      try {
+        const fileDetails = await openai.files.retrieve(vf.id);
+        filename = fileDetails.filename;
       } catch (error: any) {
-        if (error.status === 404) {
-          // Limpiar referencias huérfanas
-          await openai.beta.vectorStores.files.del(
-            FIXED_VECTOR_STORE_ID,
-            file.id
-          );
-        } else {
-          console.warn(
-            `⚠️ Error obteniendo detalles de archivo ${file.id}:`,
-            error.message
-          );
-        }
+        console.warn(
+          `⚠️ No se pudo obtener filename para ${vf.id}, usando ID como nombre:`,
+          error?.message || error
+        );
       }
+
+      filesArray.push({
+        file_id: vf.id,
+        filename,
+        status,
+      });
     }
 
     return Response.json(filesArray);
