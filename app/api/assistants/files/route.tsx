@@ -1,8 +1,9 @@
 import { openai } from "@/app/openai";
+import { toFile } from "openai/uploads";
 
 const FIXED_VECTOR_STORE_ID = "vs_69050fe6e43c8191be28bac47c3f565f";
 
-// Helper: convert a Web ReadableStream into an AsyncIterable<Uint8Array>
+// Helper: convertir Web ReadableStream en AsyncIterable<Uint8Array>
 async function* toAsyncIterable(
   stream: ReadableStream<Uint8Array>
 ): AsyncIterable<Uint8Array> {
@@ -20,12 +21,125 @@ async function* toAsyncIterable(
   }
 }
 
+// Helper: ArrayBuffer -> base64 (funciona en Node y Edge)
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  // Node.js / Next.js Node runtime
+  // eslint-disable-next-line no-undef
+  if (typeof Buffer !== "undefined") {
+    // @ts-ignore Buffer global in Node
+    return Buffer.from(buffer).toString("base64");
+  }
+
+  // Fallback para runtimes tipo browser/edge
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+// EXTRA NODE: extraer texto de una IMAGEN usando GPT-4o-mini (visión)
+async function extractTextFromImage(file: File): Promise<string> {
+  const arrayBuffer = await file.arrayBuffer();
+  const base64 = arrayBufferToBase64(arrayBuffer);
+  const mimeType = file.type || "image/png";
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              "Extract ALL readable text that appears in this image. " +
+              "Return ONLY the raw text, no explanations, no formatting, no translation.",
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:${mimeType};base64,${base64}`,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  const content = response.choices[0]?.message?.content;
+
+  if (typeof content === "string") {
+    return content;
+  }
+
+  // Si por alguna razón no viene como string, fallback vacío
+  return "";
+}
+
+// Decide cómo vamos a subir el archivo al vector store:
+// - Si es imagen -> la convertimos a TXT usando GPT-4o-mini y subimos ese texto.
+// - Si no es imagen -> se sube tal cual (con opción de streaming para archivos grandes).
+async function prepareUploadForVectorStore(
+  file: File,
+  url: URL
+): Promise<{
+  uploadable: File | Blob | AsyncIterable<Uint8Array>;
+  filename: string;
+}> {
+  const mimeType = file.type || "";
+  const isImage = mimeType.startsWith("image/");
+
+  // Si es imagen, la convertimos a texto ANTES de subirla
+  if (isImage) {
+    const extractedText = await extractTextFromImage(file);
+
+    const textBlob = new Blob([extractedText], {
+      type: "text/plain",
+    });
+
+    const baseName = file.name.replace(/\.[^/.]+$/, "");
+    const txtName = `${baseName}.txt`;
+
+    return {
+      uploadable: textBlob,
+      filename: txtName,
+    };
+  }
+
+  // Para otros tipos (PDF, doc, etc.) mantenemos la lógica de streaming opcional
+  const useStreamParam = url.searchParams.get("stream");
+  const useStream =
+    useStreamParam === "true" || file.size > 5 * 1024 * 1024; // ~5MB
+
+  if (useStream) {
+    const webStream = file.stream() as ReadableStream<Uint8Array>;
+    const iterable = toAsyncIterable(webStream);
+
+    return {
+      uploadable: iterable,
+      filename: file.name,
+    };
+  }
+
+  // Upload normal
+  return {
+    uploadable: file,
+    filename: file.name,
+  };
+}
+
 /* === UPLOAD FILE ===
  *
- * - Sube el archivo al storage de OpenAI.
- * - Usa “streaming” (AsyncIterable) para archivos grandes o si se pasa ?stream=true.
- * - Asocia el archivo al vector store (indexación asíncrona).
- * - Devuelve JSON con file_id y status para hacer polling luego.
+ * - Si el archivo es IMAGEN:
+ *   -> usa GPT-4o-mini visión para extraer texto
+ *   -> genera un .txt
+ *   -> sube el .txt al vector store.
+ *
+ * - Si no es imagen:
+ *   -> comportamiento anterior (con streaming opcional para grandes).
  */
 export async function POST(request: Request) {
   const formData = await request.formData();
@@ -37,31 +151,24 @@ export async function POST(request: Request) {
 
   try {
     const url = new URL(request.url);
-    const useStreamParam = url.searchParams.get("stream");
-    const useStream =
-      useStreamParam === "true" || file.size > 5 * 1024 * 1024; // ~5MB
 
-    let openaiFile;
+    const { uploadable, filename } = await prepareUploadForVectorStore(
+      file,
+      url
+    );
 
-    if (useStream) {
-      // Streaming upload para archivos grandes: convertir ReadableStream a Blob/File
-      // porque el cliente espera un "Uploadable" (File/Blob/stream compatible), no un AsyncIterable.
-      const webStream = file.stream() as ReadableStream<Uint8Array>;
-      // Crear un Blob consumiendo el stream vía Response, luego construir un File para subir.
-      const blob = await new Response(webStream).blob();
-      const fileToUpload = new File([blob], file.name, { type: (file as File).type });
+    // Convertimos uploadable a un tipo aceptado por el SDK usando toFile
+    // (para AsyncIterable, Blob, etc.)
+    const fileForUpload =
+      uploadable instanceof File || uploadable instanceof Blob
+        ? uploadable
+        : await toFile(uploadable as any, filename);
 
-      openaiFile = await openai.files.create({
-        file: fileToUpload,
-        purpose: "assistants",
-      });
-    } else {
-      // Upload normal para archivos pequeños/medianos
-      openaiFile = await openai.files.create({
-        file,
-        purpose: "assistants",
-      });
-    }
+    // Subimos el archivo ya “preprocesado” (imagen -> texto, o file original)
+    const openaiFile = await openai.files.create({
+      file: fileForUpload as any,
+      purpose: "assistants",
+    });
 
     // Asociar al vector store (indexación asíncrona)
     const vectorFile = await openai.beta.vectorStores.files.create(
@@ -72,15 +179,16 @@ export async function POST(request: Request) {
     );
 
     console.log(
-      `✅ Archivo ${openaiFile.filename} agregado al storage ${FIXED_VECTOR_STORE_ID} con estado ${vectorFile.status}`
+      `✅ Archivo ${openaiFile.filename} (preprocesado si era imagen) agregado al storage ${FIXED_VECTOR_STORE_ID} con estado ${vectorFile.status}`
     );
 
     return Response.json({
-      message: "Archivo cargado y en proceso de indexación",
+      message:
+        "Archivo cargado (con preprocesamiento si era imagen) y en proceso de indexación",
       file_id: openaiFile.id,
       filename: openaiFile.filename,
       vector_file_id: vectorFile.id,
-      status: vectorFile.status, // normalmente "in_progress"
+      status: vectorFile.status,
     });
   } catch (error: any) {
     console.error("❌ Error subiendo archivo:", error);
@@ -203,7 +311,7 @@ export async function DELETE(request: Request) {
     console.log(
       `🗑️ Archivo ${fileId} eliminado del storage ${FIXED_VECTOR_STORE_ID}`
     );
-    return new Response("Archivo eliminado correctamente");
+    return new Response("Archivo eliminado correctamente", { status: 200 });
   } catch (error: any) {
     if (error.status === 404) {
       console.warn(
